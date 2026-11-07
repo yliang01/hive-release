@@ -64,4 +64,4 @@ hive:
 
 测试覆盖发布、签票、程序链接下载、`ReleaseDownloader` 下载校验和配置解密，以及同版本覆盖失败。它创建随机的 `releases/integration-test-<UUID>/`，打印前缀，本地文件放在 `target/integration-work/`。测试不会自动删除远端对象；失败也可能留下部分对象。报告位于 `target/failsafe-reports/`。不要自行运行真实云端发布或修改已有秘密文件。
 
-更多网页操作见 [SELF-RELEASE.md](../hive-oss/SELF-RELEASE.md) 和 [BOOTSTRAP-POC.md](../hive-oss/BOOTSTRAP-POC.md)。
+网页端配置与发布流程见 [hive-oss README](../hive-oss/README.md)；应用架构及开发约束见 [hive-oss AGENTS.md](../hive-oss/AGENTS.md)。
