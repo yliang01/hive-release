@@ -1,4 +1,4 @@
-package cc.cc3c.hive.secret;
+package cc.cc3c.hive.release.common;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

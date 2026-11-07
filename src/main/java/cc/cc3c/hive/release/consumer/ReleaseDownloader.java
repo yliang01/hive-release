@@ -1,7 +1,12 @@
-package cc.cc3c.hive.secret;
+package cc.cc3c.hive.release.consumer;
 
-import cc.cc3c.hive.release.DownloadTicket;
-import cc.cc3c.hive.release.ReleasePaths;
+import cc.cc3c.hive.release.common.DownloadTicket;
+import cc.cc3c.hive.release.common.ReleasePaths;
+import cc.cc3c.hive.release.common.SecretException;
+import cc.cc3c.hive.release.common.FileHash;
+import cc.cc3c.hive.release.common.ReleaseArtifact;
+import cc.cc3c.hive.release.common.ReleaseManifest;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 
 import java.io.IOException;
@@ -12,18 +17,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.UUID;
 
 /**
  * Downloads only: no cloud SDK, account credential, upload or delete operation.
  */
-public final class Installer {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = SecretBundle.JSON.copy()
+public final class ReleaseDownloader {
+    private static final ObjectMapper JSON = new ObjectMapper()
             .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
 
     private static final class Http {
@@ -34,20 +36,23 @@ public final class Installer {
     /**
      * Download just the configuration for a program already installed; no activation.
      */
-    public Path downloadConfiguration(String ticketContent) throws Exception {
-        var ticket = readJson(ticketContent.getBytes(java.nio.charset.StandardCharsets.UTF_8), DownloadTicket.class);
+    public DownloadResult downloadConfiguration(DownloadTicket ticket) throws IOException, InterruptedException {
+        return downloadConfiguration(ticket, ReleasePaths.downloadDirectory());
+    }
+
+    public DownloadResult downloadConfiguration(DownloadTicket ticket, Path downloadDirectory) throws IOException, InterruptedException {
         checkExpiration(ticket);
-        Path target = ReleasePaths.downloadDirectory().resolve(UUID.randomUUID().toString());
+        Path target = downloadDirectory.resolve(UUID.randomUUID().toString());
         Files.createDirectories(target);
         Path manifestPath = target.resolve(ReleasePaths.MANIFEST);
         Path bundle = target.resolve(ReleasePaths.SECRET_BUNDLE);
         download(URI.create(ticket.manifestUrl()), manifestPath);
         download(URI.create(ticket.configurationUrl()), bundle);
         verifyHash(bundle, ReleasePaths.SECRET_BUNDLE, readJson(manifestPath, ReleaseManifest.class));
-        return bundle;
+        return new DownloadResult(ticket.version(), bundle, manifestPath);
     }
 
-    private void download(URI uri, Path target) throws Exception {
+    private void download(URI uri, Path target) throws IOException, InterruptedException {
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null)
             throw new SecretException("Download tickets require HTTPS URLs.");
         var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMinutes(15)).GET().build();
@@ -76,7 +81,7 @@ public final class Installer {
                 .filter(artifact -> artifact.name().equals(name))
                 .map(ReleaseArtifact::sha256)
                 .findFirst().orElse(null);
-        if (!hash(file).equals(expected)) throw new SecretException("Downloaded artifact failed SHA-256 verification.");
+        if (!FileHash.sha256(file).equals(expected)) throw new SecretException("Downloaded artifact failed SHA-256 verification.");
     }
 
     private static <T> T readJson(Path path, Class<T> type) throws IOException {
@@ -89,25 +94,4 @@ public final class Installer {
         }
     }
 
-    private static <T> T readJson(byte[] bytes, Class<T> type) throws IOException {
-        try {
-            return JSON.readValue(bytes, type);
-        } catch (IOException e) {
-            throw new SecretException("Invalid release metadata; details suppressed.");
-        }
-    }
-
-    public static String hash(Path path) throws IOException {
-        try {
-            var digest = MessageDigest.getInstance("SHA-256");
-            try (var in = Files.newInputStream(path)) {
-                byte[] buffer = new byte[64 * 1024];
-                int count;
-                while ((count = in.read(buffer)) != -1) digest.update(buffer, 0, count);
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
 }

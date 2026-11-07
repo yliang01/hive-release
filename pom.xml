@@ -12,6 +12,11 @@
     <name>Hive release and encrypted configuration starter</name>
     <dependencies>
         <dependency>
+            <groupId>yliang</groupId>
+            <artifactId>hive-encryption-starter</artifactId>
+            <version>1.0</version>
+        </dependency>
+        <dependency>
             <groupId>net.lingala.zip4j</groupId>
             <artifactId>zip4j</artifactId>
         </dependency>

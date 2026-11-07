@@ -1,6 +1,9 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
-import cc.cc3c.hive.secret.SecretBundle;
+import cc.cc3c.hive.release.common.DownloadTicket;
+import cc.cc3c.hive.release.common.ReleasePaths;
+import cc.cc3c.hive.release.common.SecretBundle;
+import cc.cc3c.hive.release.consumer.ReleaseDownloader;
 import org.testng.annotations.Test;
 
 import java.io.ByteArrayInputStream;
@@ -40,7 +43,7 @@ public class AliyunReleaseIT {
         properties.setDurationSeconds(3600L);
 
         String version = "integration-test-" + UUID.randomUUID();
-        System.out.println("Integration test OSS prefix: releases/" + version + "/");
+        log("OSS 测试位置: " + BUCKET + "/releases/" + version + "/");
         Path workRoot = Path.of("target", "integration-work");
         Files.createDirectories(workRoot);
         Path work = Files.createTempDirectory(workRoot, "release-");
@@ -50,26 +53,32 @@ public class AliyunReleaseIT {
         byte[] yaml = "integration-test: true\n".getBytes(StandardCharsets.UTF_8);
         char[] password = "integration-test-password".toCharArray();
         Files.write(source.resolve("test-file.txt"), program);
+        log("本地测试目录: " + work.toAbsolutePath());
 
         var publisher = new ReleasePublisher(properties);
-        Path archive = upload.resolve(ReleasePaths.PROGRAM_ARCHIVE);
-        Path bundle = upload.resolve(ReleasePaths.SECRET_BUNDLE);
-        publisher.packageDirectory(source, archive, ignored -> { });
-        Files.write(bundle, SecretBundle.encrypt(yaml, password));
-        publisher.publish(version, upload, ignored -> { });
+        log("[1/6] 打包程序、加密配置并上传发布文件");
+        PublishResult result = publisher.publish(version, source, yaml, password, upload, AliyunReleaseIT::log);
+        Path archive = result.programArchive();
+        Path bundle = result.encryptedConfiguration();
 
-        byte[] ticketBytes = publisher.createTicket(version, 300, ignored -> { });
-        DownloadTicket ticket = Json.MAPPER.readValue(ticketBytes, DownloadTicket.class);
+        log("[2/6] 签发并检查下载 ticket");
+        DownloadTicket ticket = publisher.createTicket(version, Duration.ofSeconds(300), AliyunReleaseIT::log);
         assertEquals(ticket.version(), version);
         assertTrue(Instant.parse(ticket.expiresAt()).isAfter(Instant.now()));
         var http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
+        log("[3/6] 下载程序 ZIP；使用 ReleaseDownloader 下载并校验配置");
         byte[] downloadedArchive = download(http, ticket.programUrl());
-        byte[] downloadedBundle = download(http, ticket.configurationUrl());
-        byte[] downloadedManifest = download(http, ticket.manifestUrl());
+        var downloadResult = new ReleaseDownloader().downloadConfiguration(ticket, work.resolve("download"));
+        Path downloadedConfiguration = downloadResult.configuration();
+        byte[] downloadedBundle = Files.readAllBytes(downloadedConfiguration);
+        byte[] downloadedManifest = Files.readAllBytes(downloadResult.manifest());
+        assertEquals(downloadResult.version(), version);
+        log("配置下载目录: " + downloadedConfiguration.getParent().toAbsolutePath());
+        log("[4/6] 检查下载内容、解密配置并验证程序 ZIP");
         assertEquals(downloadedArchive, Files.readAllBytes(archive));
         assertEquals(downloadedBundle, Files.readAllBytes(bundle));
         assertEquals(downloadedManifest, Files.readAllBytes(upload.resolve(ReleasePaths.MANIFEST)));
-        assertEquals(SecretBundle.decrypt(downloadedBundle, password), yaml);
+        assertEquals(SecretBundle.decrypt(downloadedConfiguration, password), yaml);
         try (var zip = new ZipInputStream(new ByteArrayInputStream(downloadedArchive))) {
             boolean found = false;
             for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) {
@@ -80,6 +89,7 @@ public class AliyunReleaseIT {
             }
             assertTrue(found, "Test file missing from downloaded ZIP");
         }
+        log("[5/6] 检查 manifest 的版本、文件大小和 SHA-256");
         var manifest = Json.MAPPER.readTree(downloadedManifest);
         assertEquals(manifest.path("version").asText(), version);
         assertEquals(manifest.path("files").size(), 2);
@@ -92,8 +102,15 @@ public class AliyunReleaseIT {
             assertEquals(file.path("size").asLong(), (long) content.length);
             assertEquals(file.path("sha256").asText(), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content)));
         }
-        expectThrows(IOException.class, () -> publisher.publish(version, upload, ignored -> { }));
+        log("[6/6] 验证同版本禁止覆盖并确认远端 manifest 不变");
+        Path retry = Files.createDirectory(work.resolve("retry"));
+        expectThrows(IOException.class, () -> publisher.publish(version, source, yaml, password, retry, ignored -> { }));
         assertEquals(download(http, ticket.manifestUrl()), downloadedManifest);
+        log("全流程验证通过；测试对象保留在上述 OSS 前缀下。");
+    }
+
+    private static void log(String message) {
+        System.out.println("[AliyunReleaseIT] " + message);
     }
 
     private static byte[] download(HttpClient http, String url) throws Exception {

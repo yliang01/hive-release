@@ -1,5 +1,7 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
+import cc.cc3c.hive.release.common.DownloadTicket;
+import cc.cc3c.hive.release.common.ReleasePaths;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -10,7 +12,7 @@ final class DownloadLinks {
     private DownloadLinks() {
     }
 
-    static byte[] create(Cloud cloud, String version, int seconds, Consumer<String> output) throws IOException {
+    static DownloadTicket create(Cloud cloud, String version, int seconds, Consumer<String> output) throws IOException {
         var description = Json.MAPPER.readTree(cloud.download("releases/" + version + "/" + ReleasePaths.MANIFEST));
         if (description.path("schema").asInt() != 1 || !version.equals(description.path("version").asText()))
             throw new ReleaseException("Invalid release manifest.");
@@ -25,10 +27,9 @@ final class DownloadLinks {
             throw new ReleaseException("Unexpected manifest files.");
         var expires = Instant.now().plusSeconds(seconds);
         output.accept("Expires: " + expires + ". URLs are not printed; treat the ticket as a secret.");
-        var ticket = new DownloadTicket(version, expires.toString(),
+        return new DownloadTicket(version, expires.toString(),
                 cloud.sign("releases/" + version + "/" + ReleasePaths.PROGRAM_ARCHIVE, seconds),
                 cloud.sign("releases/" + version + "/" + ReleasePaths.SECRET_BUNDLE, seconds),
                 cloud.sign("releases/" + version + "/" + ReleasePaths.MANIFEST, seconds));
-        return Json.bytes(ticket);
     }
 }

@@ -1,5 +1,7 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
+import cc.cc3c.hive.release.common.ReleasePaths;
+import cc.cc3c.hive.release.common.ReleaseManifest;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 import net.lingala.zip4j.ZipFile;
@@ -55,7 +57,12 @@ public class ReleaseTest {
     @Test
     public void manifestContainsPublishedFilesSizesAndHashes() throws Exception {
         publisher.publish(config, options());
-        var manifest = Json.MAPPER.readTree(cloud.objects.get("releases/test-version/" + ReleasePaths.MANIFEST));
+        byte[] bytes = cloud.objects.get("releases/test-version/" + ReleasePaths.MANIFEST);
+        var manifest = Json.MAPPER.readTree(bytes);
+        var sharedManifest = Json.MAPPER.readValue(bytes, ReleaseManifest.class);
+        assertEquals(sharedManifest.version(), "test-version");
+        assertEquals(sharedManifest.files().stream().map(artifact -> artifact.name()).toList(),
+                List.of(ReleasePaths.PROGRAM_ARCHIVE, ReleasePaths.SECRET_BUNDLE));
         assertEquals(manifest.path("schema").asInt(), 1);
         assertEquals(manifest.path("version").asText(), "test-version");
         assertEquals(manifest.path("files").size(), 2);
@@ -96,13 +103,14 @@ public class ReleaseTest {
         publisher.publish(config, options());
         var messages = new ArrayList<String>();
         var ticket = DownloadLinks.create(cloud, "test-version", 900, messages::add);
-        var ticketJson = Json.MAPPER.readTree(ticket);
+        var ticketJson = Json.MAPPER.valueToTree(ticket);
         assertTrue(ticketJson.path("program_url").isTextual());
         assertTrue(ticketJson.path("configuration_url").isTextual());
         assertTrue(ticketJson.path("manifest_url").isTextual());
         assertEquals(cloud.signed, List.of("releases/test-version/hive-release.zip:900",
                 "releases/test-version/secret.yml.enc:900", "releases/test-version/manifest.json:900"));
         assertFalse(String.join("\n", messages).contains("https://"));
+        assertFalse(ticket.toString().contains("https://"));
         cloud.objects.put("releases/test-version/" + ReleasePaths.MANIFEST, "{}".getBytes(StandardCharsets.UTF_8));
         expectThrows(ReleaseException.class, () -> DownloadLinks.create(cloud, "test-version", 900, ignored -> { }));
     }

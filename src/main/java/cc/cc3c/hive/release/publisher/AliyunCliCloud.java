@@ -1,4 +1,4 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
 import com.fasterxml.jackson.databind.JsonNode;
 

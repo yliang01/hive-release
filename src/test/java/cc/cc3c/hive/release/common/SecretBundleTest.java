@@ -1,11 +1,15 @@
-package cc.cc3c.hive.secret;
+package cc.cc3c.hive.release.common;
 
+import cc.cc3c.hive.encryption.HiveEncryption;
+import cc.cc3c.hive.encryption.HiveEncryptionConfig;
 import org.testng.annotations.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.List;
 
 import static org.testng.Assert.*;
 
@@ -13,23 +17,38 @@ public class SecretBundleTest {
     private static final char[] PASSWORD = "poc-unlock-password-2026".toCharArray();
 
     @Test
-    public void authenticatedRoundTripUsesFreshRandomness() throws Exception {
+    public void roundTripUsesExistingEncryptionFormat() throws Exception {
         byte[] first = SecretBundle.encrypt(TestFixtures.properties(), PASSWORD);
         byte[] second = SecretBundle.encrypt(TestFixtures.properties(), PASSWORD);
-        assertFalse(Arrays.equals(first, second));
+        assertEquals(first, second);
         assertEquals(SecretBundle.decrypt(first, PASSWORD), TestFixtures.properties());
         assertFalse(new String(first, java.nio.charset.StandardCharsets.ISO_8859_1).contains("POC-NOT-A-REAL-SECRET"));
+        byte[] bytes = new String(PASSWORD).getBytes(StandardCharsets.UTF_8);
+        var cipher = new HiveEncryption(new HiveEncryptionConfig(bytes, bytes), bytes);
+        var output = new ByteArrayOutputStream();
+        cipher.decryptStream(new ByteArrayInputStream(first), output);
+        assertEquals(output.toByteArray(), TestFixtures.properties());
     }
 
     @Test
-    public void wrongPasswordAndTamperingFailClosed() throws Exception {
+    public void wrongPasswordFailsForTestData() throws Exception {
         byte[] data = SecretBundle.encrypt(TestFixtures.properties(), PASSWORD);
         expectThrows(SecretException.class, () -> SecretBundle.decrypt(data, "incorrect-password".toCharArray()));
-        for (int index : List.of(0, 10, 15, 35, data.length - 1)) {
-            byte[] modified = data.clone();
-            modified[index] ^= 1;
-            expectThrows(SecretException.class, () -> SecretBundle.decrypt(modified, PASSWORD));
-        }
+    }
+
+    @Test
+    public void ciphertextModificationIsNotAuthenticated() {
+        byte[] plaintext = TestFixtures.properties();
+        byte[] ciphertext = SecretBundle.encrypt(plaintext, PASSWORD);
+        ciphertext[0] ^= 1;
+        assertFalse(Arrays.equals(SecretBundle.decrypt(ciphertext, PASSWORD), plaintext));
+    }
+
+    @Test
+    public void unicodePasswordsUseUtf8() {
+        char[] password = "密码测试密码测试abcdef".toCharArray();
+        byte[] plaintext = "配置: 测试\n".getBytes(StandardCharsets.UTF_8);
+        assertEquals(SecretBundle.decrypt(SecretBundle.encrypt(plaintext, password), password), plaintext);
     }
 
     @Test

@@ -1,6 +1,9 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
-import cc.cc3c.hive.secret.Installer;
+import cc.cc3c.hive.release.common.FileHash;
+import cc.cc3c.hive.release.common.ReleaseArtifact;
+import cc.cc3c.hive.release.common.ReleaseManifest;
+import cc.cc3c.hive.release.common.ReleasePaths;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -23,17 +26,17 @@ final class Publisher {
     }
 
     static String hash(Path path) throws IOException {
-        return Installer.hash(path);
+        return FileHash.sha256(path);
     }
 
     private void writeManifest(Options options) throws IOException {
-        var files = new ArrayList<Object>();
+        var files = new ArrayList<ReleaseArtifact>();
         for (var name : List.of(ReleasePaths.PROGRAM_ARCHIVE, ReleasePaths.SECRET_BUNDLE)) {
             var path = options.directory().resolve(name);
-            files.add(Json.object("name", name, "size", Files.size(path), "sha256", hash(path)));
+            files.add(new ReleaseArtifact(name, Files.size(path), hash(path)));
         }
         Json.write(options.directory().resolve(ReleasePaths.MANIFEST),
-                Json.object("schema", 1, "version", options.version(), "files", files));
+                new ReleaseManifest(1, options.version(), files));
         output.accept("Manifest: " + options.directory().resolve(ReleasePaths.MANIFEST).toAbsolutePath());
     }
 

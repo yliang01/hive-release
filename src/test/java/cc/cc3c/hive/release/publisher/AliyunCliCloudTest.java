@@ -1,4 +1,4 @@
-package cc.cc3c.hive.release;
+package cc.cc3c.hive.release.publisher;
 
 import org.testng.annotations.Test;
 import java.io.IOException;

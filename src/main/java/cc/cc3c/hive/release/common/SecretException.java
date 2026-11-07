@@ -1,4 +1,4 @@
-package cc.cc3c.hive.secret;
+package cc.cc3c.hive.release.common;
 
 /**
  * Messages must never contain configuration values, passwords or signed URLs.
