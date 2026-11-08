@@ -1,6 +1,7 @@
 package cc.cc3c.hive.release.publisher;
 
-import cc.cc3c.hive.release.common.DownloadTicket;
+import cc.cc3c.hive.release.common.ReleaseArtifact;
+import cc.cc3c.hive.release.common.ReleaseManifest;
 import cc.cc3c.hive.release.common.ReleasePaths;
 import cc.cc3c.hive.release.common.SecretBundle;
 import cc.cc3c.hive.release.consumer.ReleaseDownloader;
@@ -61,23 +62,22 @@ public class AliyunReleaseIT {
         Path archive = result.programArchive();
         Path bundle = result.encryptedConfiguration();
 
-        log("[2/6] 签发并检查下载 ticket");
-        DownloadTicket ticket = publisher.createTicket(version, Duration.ofSeconds(300), AliyunReleaseIT::log);
-        assertEquals(ticket.version(), version);
-        assertTrue(Instant.parse(ticket.expiresAt()).isAfter(Instant.now()));
+        log("[2/6] 签发并检查带下载链接的 manifest");
+        ReleaseManifest manifest = publisher.createManifest(version, Duration.ofSeconds(300), AliyunReleaseIT::log);
+        assertEquals(manifest.files().size(), 2);
+        for (ReleaseArtifact artifact : manifest.files()) assertTrue(Instant.parse(artifact.expiresAt()).isAfter(Instant.now()));
         var http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
         log("[3/6] 下载程序 ZIP；使用 ReleaseDownloader 下载并校验配置");
-        byte[] downloadedArchive = download(http, ticket.programUrl());
-        var downloadResult = new ReleaseDownloader().downloadConfiguration(ticket, work.resolve("download"));
+        String programUrl = manifest.files().stream().filter(file -> file.name().equals(ReleasePaths.PROGRAM_ARCHIVE))
+                .map(ReleaseArtifact::url).findFirst().orElseThrow();
+        byte[] downloadedArchive = download(http, programUrl);
+        var downloadResult = new ReleaseDownloader().downloadConfiguration(manifest, work.resolve("download"));
         Path downloadedConfiguration = downloadResult.configuration();
         byte[] downloadedBundle = Files.readAllBytes(downloadedConfiguration);
-        byte[] downloadedManifest = Files.readAllBytes(downloadResult.manifest());
-        assertEquals(downloadResult.version(), version);
         log("配置下载目录: " + downloadedConfiguration.getParent().toAbsolutePath());
         log("[4/6] 检查下载内容、解密配置并验证程序 ZIP");
         assertEquals(downloadedArchive, Files.readAllBytes(archive));
         assertEquals(downloadedBundle, Files.readAllBytes(bundle));
-        assertEquals(downloadedManifest, Files.readAllBytes(upload.resolve(ReleasePaths.MANIFEST)));
         assertEquals(SecretBundle.decrypt(downloadedConfiguration, password), yaml);
         try (var zip = new ZipInputStream(new ByteArrayInputStream(downloadedArchive))) {
             boolean found = false;
@@ -89,11 +89,12 @@ public class AliyunReleaseIT {
             }
             assertTrue(found, "Test file missing from downloaded ZIP");
         }
-        log("[5/6] 检查 manifest 的版本、文件大小和 SHA-256");
-        var manifest = Json.MAPPER.readTree(downloadedManifest);
-        assertEquals(manifest.path("version").asText(), version);
-        assertEquals(manifest.path("files").size(), 2);
-        for (var file : manifest.path("files")) {
+        log("[5/6] 检查 manifest 的文件大小和 SHA-256");
+        var manifestJson = Json.MAPPER.valueToTree(manifest);
+        assertFalse(manifestJson.has("schema"));
+        assertFalse(manifestJson.has("version"));
+        assertEquals(manifestJson.path("files").size(), 2);
+        for (var file : manifestJson.path("files")) {
             byte[] content = switch (file.path("name").asText()) {
                 case ReleasePaths.PROGRAM_ARCHIVE -> downloadedArchive;
                 case ReleasePaths.SECRET_BUNDLE -> downloadedBundle;
@@ -101,11 +102,17 @@ public class AliyunReleaseIT {
             };
             assertEquals(file.path("size").asLong(), (long) content.length);
             assertEquals(file.path("sha256").asText(), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content)));
+            assertTrue(file.path("url").isTextual());
+            assertTrue(file.path("expires_at").isTextual());
         }
-        log("[6/6] 验证同版本禁止覆盖并确认远端 manifest 不变");
+        byte[] publishedManifest = Files.readAllBytes(upload.resolve(ReleasePaths.MANIFEST));
+        var publishedManifestJson = Json.MAPPER.readTree(publishedManifest);
+        assertFalse(publishedManifestJson.has("schema"));
+        assertFalse(publishedManifestJson.has("version"));
+        log("[6/6] 验证同版本禁止覆盖并保留远端基础 manifest");
         Path retry = Files.createDirectory(work.resolve("retry"));
         expectThrows(IOException.class, () -> publisher.publish(version, source, yaml, password, retry, ignored -> { }));
-        assertEquals(download(http, ticket.manifestUrl()), downloadedManifest);
+        assertEquals(Files.readAllBytes(upload.resolve(ReleasePaths.MANIFEST)), publishedManifest);
         log("全流程验证通过；测试对象保留在上述 OSS 前缀下。");
     }
 

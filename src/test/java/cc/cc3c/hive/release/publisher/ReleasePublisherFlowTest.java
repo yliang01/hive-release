@@ -13,7 +13,7 @@ import static org.testng.Assert.*;
 
 public class ReleasePublisherFlowTest {
     @Test
-    public void publishesPreparedFilesAndReturnsTypedTicket() throws Exception {
+    public void publishesPreparedFilesAndReturnsSignedManifest() throws Exception {
         Path root = Path.of("target", "test-work");
         Files.createDirectories(root);
         Path work = Files.createTempDirectory(root, "flow-");
@@ -41,14 +41,16 @@ public class ReleasePublisherFlowTest {
         assertEquals(result.configurationSha256(), cc.cc3c.hive.release.common.FileHash.sha256(result.encryptedConfiguration()));
         assertEquals(cloud.uploads.size(), 3);
 
-        var ticket = publisher.createTicket("v1", Duration.ofSeconds(900), logs::add);
-        assertEquals(ticket.version(), "v1");
-        assertTrue(ticket.configurationUrl().startsWith("https://"));
-        assertFalse(ticket.toString().contains("https://"));
+        var manifest = publisher.createManifest("v1", Duration.ofSeconds(900), logs::add);
+        var configuration = manifest.files().stream().filter(file -> file.name().equals("secret.yml.enc")).findFirst().orElseThrow();
+        assertTrue(configuration.url().startsWith("https://"));
+        assertFalse(manifest.toString().contains("https://"));
         assertFalse(String.join("\n", logs).contains("https://"));
-        var serialized = Json.MAPPER.valueToTree(ticket);
-        assertTrue(serialized.has("configuration_url"));
-        assertTrue(serialized.has("program_url"));
-        assertTrue(serialized.has("manifest_url"));
+        var serialized = Json.MAPPER.valueToTree(manifest);
+        assertTrue(serialized.path("files").isArray());
+        assertTrue(serialized.path("files").get(0).has("expires_at"));
+        assertTrue(serialized.path("files").get(0).has("url"));
+        assertFalse(serialized.has("version"));
+        assertFalse(serialized.has("schema"));
     }
 }

@@ -5,9 +5,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.Set;
 
 final class AliyunCliCloud implements Cloud {
     @FunctionalInterface
@@ -34,7 +37,37 @@ final class AliyunCliCloud implements Cloud {
         if (!state.isObject()) throw new IOException("Cannot verify bucket versioning state.");
         JsonNode status = state.path("Status");
         if (!status.isMissingNode() && !status.isNull() && (!status.isTextual() || !status.asText().isEmpty()))
-            throw new ReleaseException("Bucket versioning is enabled, suspended, or unrecognized. Publication stopped.");
+            throw new ReleaseException("Bucket versioning is enabled, suspended, or unrecognized. Operation stopped.");
+    }
+
+    @Override
+    public List<CloudObject> list(String prefix) throws IOException {
+        var objects = new ArrayList<CloudObject>();
+        Set<String> seenTokens = new HashSet<>();
+        String continuationToken = null;
+        while (true) {
+            var args = new ArrayList<>(List.of("ossutil", "api", "list-objects-v2", "--bucket", config.bucket(),
+                    "--prefix", prefix, "--max-keys", "1000", "--output-format", "json", "--quiet"));
+            if (continuationToken != null) {
+                args.add("--continuation-token");
+                args.add(continuationToken);
+            }
+            JsonNode body = readJson(run(args), "Invalid OSS object listing response.");
+            JsonNode contents = body.path("Contents");
+            if (contents.isArray()) {
+                for (JsonNode item : contents) {
+                    String key = item.path("Key").asText("");
+                    if (key.isBlank()) continue;
+                    String modified = item.path("LastModified").asText("");
+                    Instant lastModified = modified.isBlank() ? null : Instant.parse(modified);
+                    objects.add(new CloudObject(key, lastModified));
+                }
+            }
+            if (!body.path("IsTruncated").asBoolean(false)) return List.copyOf(objects);
+            continuationToken = body.path("NextContinuationToken").asText("");
+            if (continuationToken.isBlank() || !seenTokens.add(continuationToken))
+                throw new IOException("OSS object listing pagination did not advance.");
+        }
     }
 
     @Override
@@ -49,8 +82,23 @@ final class AliyunCliCloud implements Cloud {
     }
 
     @Override
+    public void delete(String key) throws IOException {
+        run(List.of("ossutil", "api", "delete-object", "--bucket", config.bucket(), "--key", key, "--quiet"));
+    }
+
+    @Override
     public String sign(String key, int seconds) throws IOException {
-        String output = new String(run(List.of("oss", "sign", object(key), "--timeout", Integer.toString(seconds))), StandardCharsets.UTF_8);
+        return sign(key, seconds, null);
+    }
+
+    @Override
+    public String sign(String key, int seconds, String responseContentDisposition) throws IOException {
+        var args = new ArrayList<>(List.of("oss", "sign", object(key), "--timeout", Integer.toString(seconds)));
+        if (responseContentDisposition != null && !responseContentDisposition.isBlank()) {
+            args.add("--query-param");
+            args.add("response-content-disposition:" + responseContentDisposition);
+        }
+        String output = new String(run(args), StandardCharsets.UTF_8);
         var urls = output.lines().map(String::strip).filter(line -> line.startsWith("https://")).toList();
         if (urls.size() != 1)
             throw new IOException("Invalid signed URL returned by Alibaba Cloud CLI.");
@@ -58,6 +106,17 @@ final class AliyunCliCloud implements Cloud {
     }
 
     private String object(String key) { return "oss://" + config.bucket() + "/" + key; }
+
+    private JsonNode readJson(byte[] response, String message) throws IOException {
+        try (var parser = Json.MAPPER.getFactory().createParser(response)) {
+            JsonNode body = Json.MAPPER.readTree(parser);
+            if (body == null || !body.isObject()) throw new IOException(message);
+            return body;
+        } catch (IOException e) {
+            throw new IOException(message);
+        }
+    }
+
     private byte[] run(List<String> args) throws IOException {
         if (credentials == null) {
             byte[] response = runner.run(config.profile(), Map.of(), List.of("sts", "AssumeRole",

@@ -2,22 +2,22 @@
 
 ## 作用与边界
 
-`hive-release` 是 Java 21 / Spring Boot starter，负责发布程序和加密配置、签发下载 ticket，以及在使用方下载并校验加密配置。模块不编译或组装程序，也不负责安装、升级或启动程序。Hive 的管理 UI 不依赖发布凭据启动；业务容器启动后才提供发布服务。
+`hive-release` 是 Java 21 / Spring Boot starter，负责发布程序和加密配置、签发包含临时下载 URL 的 manifest，以及在使用方下载并校验加密配置。模块不编译或组装程序，也不负责安装、升级或启动程序。Hive 的管理 UI 不依赖发布凭据启动；业务容器启动后才提供发布服务。
 
 源码位于 `src/main/java/cc/cc3c/hive/release/`，按职责分为：
 
-- `publisher`：`ReleasePublisher` 是发布入口；`AliyunCliCloud` / `AliyunCli` 负责 STS 和 OSS CLI 调用，`DownloadLinks` 签发 ticket。
+- `publisher`：`ReleasePublisher` 是发布入口；`AliyunCliCloud` / `AliyunCli` 负责 STS 和 OSS CLI 调用，`DownloadLinks` 在基础 manifest 上签发临时下载 URL。
 - `consumer`：`ReleaseDownloader` 下载 manifest 和加密配置，校验配置文件的 SHA-256；不下载程序 ZIP。
-- `common`：`ReleaseManifest`、`ReleaseArtifact`、`DownloadTicket`、`ReleasePaths`、`FileHash`、`SecretBundle` 和 `SecretException`。
+- `common`：`ReleaseManifest`、`ReleaseArtifact`、`ReleasePaths`、`FileHash`、`SecretBundle` 和 `SecretException`。
 
 调用方在 `hive-oss`：发布入口是 `business/release/SelfReleaseService` 和 `SelfReleaseController`，下载及解锁入口是 `setup/SetupService`。发布自动配置为 `publisher/ReleaseAutoConfiguration`，注册在 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`；`HiveOssApplication` 的管理容器按类名排除它。
 
 ## 公开接口和流程
 
 - `ReleasePublisher.publish(version, programDirectory, configurationYaml, password, outputDirectory, log)` 打包指定目录、加密 YAML、生成 manifest 并上传，返回 `PublishResult`（版本、产物路径和哈希）。调用方准备空的产物目录；已有 ZIP 或加密配置不会被覆盖。源目录内容原样进入 ZIP，目录名为 ZIP 顶层目录，输出必须位于源目录外。
-- `ReleasePublisher.createTicket(version, Duration, log)` 返回 `DownloadTicket`；调用方负责 JSON 序列化。ticket 的签名链接是敏感信息，`toString()` 不显示 URL，不应输出 URL 或临时凭据到日志。
-- `ReleaseDownloader.downloadConfiguration(ticket[, directory])` 下载 manifest 和加密配置并校验配置的 SHA-256，返回 `DownloadResult`。未指定目录时使用当前工作目录下 `.release/download/<UUID>/`。下载与输入密码解锁是两个步骤；`SecretBundle.decrypt` 返回 YAML 原始字节。
-- `ReleaseManifest` / `ReleaseArtifact` 是发布方和下载方共用的数据结构。JSON 字段为 `schema`、`version`、`files`、`name`、`size`、`sha256`；修改时保持两端和现有 manifest 一致。
+- `ReleasePublisher.createManifest(version, Duration, log)` 返回带签名下载 URL 的 `ReleaseManifest`；调用方负责 JSON 序列化。签名 URL 是敏感信息，`toString()` 不显示 URL，不应输出 URL 或临时凭据到日志。
+- `ReleaseDownloader.downloadConfiguration(manifest[, directory])` 使用导入 manifest 内的地址下载加密配置，并校验其大小与 SHA-256；不会再下载基础 manifest。未指定目录时使用当前工作目录下 `.release/download/<UUID>/`。下载与输入密码解锁是两个步骤；`SecretBundle.decrypt` 返回 YAML 原始字节。
+- `ReleaseManifest` / `ReleaseArtifact` 是发布方和下载方共用的数据结构。基础 manifest 的每项仅包含 `name`、`size`、`sha256`；签名 manifest 的每项额外包含 `expires_at`、`url`。顶层不包含 `schema` 或 `version`。旧数据中的额外字段会被忽略。
 
 Hive 从当前工作目录的 `.release/build` 打包，在 `.release/upload` 写发布产物，并在 `.release/download` 保存下载结果；`current.txt` 在业务成功启动后记录选中的加密配置路径。`package-release.cmd` 在构建后调用根目录 `assemble-release.cmd`，将 JAR 和 `hive-oss/src/distribution` 中的发布资源组装到 `.release/build`。IDE 的工作目录会影响这些路径。
 
@@ -42,9 +42,9 @@ hive:
     duration-seconds: 3600
 ```
 
-操作员 profile 由 CLI 管理，必须有权限通过 STS AssumeRole 扮演发布角色；发布角色需要相应 OSS 权限。每次发布或签发 ticket 调用一次 `sts AssumeRole`，后续命令使用该会话的临时凭据。OSS 命令显式传入地域；`credentials-file`、超时和重试不再由本模块配置。避免记录 CLI 原始输出、密码、凭据和签名链接。
+操作员 profile 由 CLI 管理，必须有权限通过 STS AssumeRole 扮演发布角色；发布角色需要相应 OSS 权限：上传、下载和签发链接需要 `oss:PutObject` / `oss:GetObject`，版本列表需要 `oss:ListObjects`，删除版本需要 `oss:DeleteObject`。每次发布、列版本、签票或删除操作会调用 `sts AssumeRole`，同一批签票/删除操作共享该次临时凭据。OSS 命令显式传入地域；`credentials-file`、超时和重试不再由本模块配置。避免记录 CLI 原始输出、密码、凭据和签名链接。
 
-每个版本写入 `releases/<version>/`：`hive-release.zip`、`secret.yml.enc`、`manifest.json`。发布前检查 Bucket 版本控制状态；启用或暂停版本控制时停止发布。上传使用 `x-oss-forbid-overwrite`，按上述顺序上传，manifest 最后作为完成标记。失败保留已上传对象和本地文件，不自动回滚；有已有对象时使用新版本号。下载校验哈希，但没有发行者签名。ticket 的实际有效时间还受 STS 凭据有效期影响。
+每个版本写入 `releases/<version>/`：`hive-release.zip`、`secret.yml.enc`、`manifest.json`。发布前检查 Bucket 版本控制状态；启用或暂停版本控制时停止发布。上传使用 `x-oss-forbid-overwrite`，按上述顺序上传，基础 manifest 最后作为完成标记。管理页仅列出这三项对象齐全且 manifest 有效的版本。签发程序包 URL 时通过 OSS `response-content-disposition` 覆盖下载名为 `hive-release-<version>.zip`，不改变对象 key。单版本签发返回 ZIP，内含加签后的 `manifest.json` 和使用程序包 URL 的 HTML 下载页；导入时直接用该 manifest 下载配置，不再额外请求 manifest。批量删除先检查 Bucket 未启用版本控制并校验所有版本，再按版本删除上述三个精确对象，manifest 最后删除；失败时已删除的对象不会自动恢复。失败的发布保留已上传对象和本地文件；有已有对象时使用新版本号。下载校验大小与哈希，但没有发行者签名。签名 URL 有效时间还受 STS 凭据有效期影响。
 
 ## 构建与验证
 

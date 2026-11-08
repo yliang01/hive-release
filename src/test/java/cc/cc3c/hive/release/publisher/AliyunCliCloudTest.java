@@ -40,11 +40,14 @@ public class AliyunCliCloudTest {
         cloud.checkVersioning();
         cloud.put("releases/v1/file.zip", Path.of("target", "a b.zip"));
         assertEquals(new String(cloud.download("releases/v1/manifest.json"), StandardCharsets.UTF_8), "manifest");
-        assertTrue(cloud.sign("releases/v1/file.zip", 900).startsWith("https://"));
+        assertTrue(cloud.sign("releases/v1/file.zip", 900,
+                "attachment;filename=hive-release-v1.zip").startsWith("https://"));
         assertEquals(assumedRoles.get(), 1);
         assertTrue(commands.get(1).containsAll(List.of("--forbid-overwrite", "--cache-control", "no-store")));
         assertTrue(commands.get(1).stream().anyMatch(s -> s.startsWith("file://") && s.endsWith("a b.zip")));
         assertTrue(commands.get(3).containsAll(List.of("oss", "sign", "--timeout", "900")));
+        assertTrue(commands.get(3).containsAll(List.of("--query-param",
+                "response-content-disposition:attachment;filename=hive-release-v1.zip")));
     }
 
     @Test

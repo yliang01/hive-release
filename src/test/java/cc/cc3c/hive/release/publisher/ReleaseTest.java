@@ -60,11 +60,10 @@ public class ReleaseTest {
         byte[] bytes = cloud.objects.get("releases/test-version/" + ReleasePaths.MANIFEST);
         var manifest = Json.MAPPER.readTree(bytes);
         var sharedManifest = Json.MAPPER.readValue(bytes, ReleaseManifest.class);
-        assertEquals(sharedManifest.version(), "test-version");
         assertEquals(sharedManifest.files().stream().map(artifact -> artifact.name()).toList(),
                 List.of(ReleasePaths.PROGRAM_ARCHIVE, ReleasePaths.SECRET_BUNDLE));
-        assertEquals(manifest.path("schema").asInt(), 1);
-        assertEquals(manifest.path("version").asText(), "test-version");
+        assertFalse(manifest.has("schema"));
+        assertFalse(manifest.has("version"));
         assertEquals(manifest.path("files").size(), 2);
         for (var file : manifest.path("files")) {
             var source = root.resolve("inputs").resolve(file.path("name").asText());
@@ -102,15 +101,17 @@ public class ReleaseTest {
     public void linksValidateManifestAndNeverPrintUrls() throws Exception {
         publisher.publish(config, options());
         var messages = new ArrayList<String>();
-        var ticket = DownloadLinks.create(cloud, "test-version", 900, messages::add);
-        var ticketJson = Json.MAPPER.valueToTree(ticket);
-        assertTrue(ticketJson.path("program_url").isTextual());
-        assertTrue(ticketJson.path("configuration_url").isTextual());
-        assertTrue(ticketJson.path("manifest_url").isTextual());
+        var signedManifest = DownloadLinks.createManifest(cloud, "test-version", 900, messages::add);
+        var manifestJson = Json.MAPPER.valueToTree(signedManifest);
+        assertEquals(manifestJson.path("files").size(), 2);
+        assertTrue(manifestJson.path("files").get(0).path("url").isTextual());
+        assertTrue(manifestJson.path("files").get(0).path("expires_at").isTextual());
+        assertFalse(manifestJson.has("version"));
+        assertFalse(manifestJson.has("schema"));
         assertEquals(cloud.signed, List.of("releases/test-version/hive-release.zip:900",
-                "releases/test-version/secret.yml.enc:900", "releases/test-version/manifest.json:900"));
+                "releases/test-version/secret.yml.enc:900"));
         assertFalse(String.join("\n", messages).contains("https://"));
-        assertFalse(ticket.toString().contains("https://"));
+        assertFalse(signedManifest.toString().contains("https://"));
         cloud.objects.put("releases/test-version/" + ReleasePaths.MANIFEST, "{}".getBytes(StandardCharsets.UTF_8));
         expectThrows(ReleaseException.class, () -> DownloadLinks.create(cloud, "test-version", 900, ignored -> { }));
     }
@@ -127,6 +128,11 @@ public class ReleaseTest {
             if (versioned) throw new ReleaseException("Versioning enabled");
         }
 
+        public List<CloudObject> list(String prefix) {
+            return objects.keySet().stream().filter(key -> key.startsWith(prefix))
+                    .map(key -> new CloudObject(key, null)).toList();
+        }
+
         public byte[] download(String key) throws IOException {
             if (failDownload) throw new IOException("AccessDenied");
             var value = objects.get(key);
@@ -141,6 +147,10 @@ public class ReleaseTest {
             if (objects.containsKey(key)) throw new IOException("Overwrite refused");
             objects.put(key, Files.readAllBytes(source));
             uploads.add(key);
+        }
+
+        public void delete(String key) {
+            objects.remove(key);
         }
 
         public String sign(String key, int seconds) {

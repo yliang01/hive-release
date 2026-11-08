@@ -1,7 +1,7 @@
 package cc.cc3c.hive.release.publisher;
 
-import cc.cc3c.hive.release.common.DownloadTicket;
 import cc.cc3c.hive.release.common.FileHash;
+import cc.cc3c.hive.release.common.ReleaseManifest;
 import cc.cc3c.hive.release.common.ReleasePaths;
 import cc.cc3c.hive.release.common.SecretBundle;
 import net.lingala.zip4j.ZipFile;
@@ -11,6 +11,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -45,6 +47,7 @@ public final class ReleasePublisher {
 
     public PublishResult publish(String version, Path programDirectory, byte[] configurationYaml, char[] password,
                                  Path outputDirectory, Consumer<String> log) throws IOException {
+        ReleaseVersion.requireValid(version);
         var config = properties.resolve();
         Files.createDirectories(outputDirectory);
         Path archive = outputDirectory.resolve(ReleasePaths.PROGRAM_ARCHIVE);
@@ -58,10 +61,39 @@ public final class ReleasePublisher {
         return new PublishResult(version, archive, encrypted, manifest, archiveHash, configurationHash);
     }
 
-    public DownloadTicket createTicket(String version, Duration validity, Consumer<String> log) throws IOException {
-        try (var cloud = cloudFactory.create(properties.resolve())) {
-            return DownloadLinks.create(cloud, version, Math.toIntExact(validity.toSeconds()), log);
+    public ReleaseManifest createManifest(String version, Duration validity, Consumer<String> log) throws IOException {
+        ReleaseVersion.requireValid(version);
+        ReleaseConfig config = properties.resolve();
+        validateValidity(validity, config);
+        try (var cloud = cloudFactory.create(config)) {
+            return DownloadLinks.createManifest(cloud, version, Math.toIntExact(validity.toSeconds()), log);
         }
+    }
+
+    public List<PublishedRelease> listPublishedReleases() throws IOException {
+        return new Publisher(cloudFactory, ignored -> { }).list(properties.resolve());
+    }
+
+    public void deleteReleases(List<String> versions) throws IOException {
+        List<String> selectedVersions = validateVersions(versions);
+        new Publisher(cloudFactory, ignored -> { }).delete(properties.resolve(), selectedVersions);
+    }
+
+    private static List<String> validateVersions(List<String> versions) {
+        if (versions == null || versions.isEmpty() || versions.size() > 100)
+            throw new ReleaseException("请选择 1 到 100 个版本。");
+        var unique = new HashSet<String>();
+        for (String version : versions) {
+            ReleaseVersion.requireValid(version);
+            if (!unique.add(version)) throw new ReleaseException("版本列表不能包含重复项。");
+        }
+        return List.copyOf(versions);
+    }
+
+    private static void validateValidity(Duration validity, ReleaseConfig config) {
+        if (validity == null || validity.isZero() || validity.isNegative()
+                || validity.getNano() != 0 || validity.getSeconds() > config.durationSeconds())
+            throw new ReleaseException("Manifest URL 有效期必须为正整数秒，且不超过临时凭据有效期。");
     }
 
 }

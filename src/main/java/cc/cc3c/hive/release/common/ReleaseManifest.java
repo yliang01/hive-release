@@ -1,5 +1,8 @@
 package cc.cc3c.hive.release.common;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import java.util.List;
 
-public record ReleaseManifest(Integer schema, String version, List<ReleaseArtifact> files) { }
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record ReleaseManifest(List<ReleaseArtifact> files) { }

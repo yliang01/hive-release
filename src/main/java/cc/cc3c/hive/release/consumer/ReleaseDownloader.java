@@ -1,13 +1,11 @@
 package cc.cc3c.hive.release.consumer;
 
-import cc.cc3c.hive.release.common.DownloadTicket;
-import cc.cc3c.hive.release.common.ReleasePaths;
-import cc.cc3c.hive.release.common.SecretException;
 import cc.cc3c.hive.release.common.FileHash;
 import cc.cc3c.hive.release.common.ReleaseArtifact;
 import cc.cc3c.hive.release.common.ReleaseManifest;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.DeserializationFeature;
+import cc.cc3c.hive.release.common.ReleasePaths;
+import cc.cc3c.hive.release.common.SecretBundle;
+import cc.cc3c.hive.release.common.SecretException;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,42 +17,42 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
- * Downloads only: no cloud SDK, account credential, upload or delete operation.
+ * Downloads the encrypted configuration described by an issued manifest; no cloud SDK or credentials.
  */
 public final class ReleaseDownloader {
-    private static final ObjectMapper JSON = new ObjectMapper()
-            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
-
     private static final class Http {
         private static final HttpClient CLIENT = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20))
                 .followRedirects(HttpClient.Redirect.NEVER).build();
     }
 
-    /**
-     * Download just the configuration for a program already installed; no activation.
-     */
-    public DownloadResult downloadConfiguration(DownloadTicket ticket) throws IOException, InterruptedException {
-        return downloadConfiguration(ticket, ReleasePaths.downloadDirectory());
+    /** Download only the encrypted configuration; the imported manifest already contains its URL and hash. */
+    public DownloadResult downloadConfiguration(ReleaseManifest manifest) throws IOException, InterruptedException {
+        return downloadConfiguration(manifest, ReleasePaths.downloadDirectory());
     }
 
-    public DownloadResult downloadConfiguration(DownloadTicket ticket, Path downloadDirectory) throws IOException, InterruptedException {
-        checkExpiration(ticket);
+    public DownloadResult downloadConfiguration(ReleaseManifest manifest, Path downloadDirectory) throws IOException, InterruptedException {
+        Map<String, ReleaseArtifact> files = validateManifest(manifest);
+        ReleaseArtifact configuration = files.get(ReleasePaths.SECRET_BUNDLE);
         Path target = downloadDirectory.resolve(UUID.randomUUID().toString());
         Files.createDirectories(target);
-        Path manifestPath = target.resolve(ReleasePaths.MANIFEST);
         Path bundle = target.resolve(ReleasePaths.SECRET_BUNDLE);
-        download(URI.create(ticket.manifestUrl()), manifestPath);
-        download(URI.create(ticket.configurationUrl()), bundle);
-        verifyHash(bundle, ReleasePaths.SECRET_BUNDLE, readJson(manifestPath, ReleaseManifest.class));
-        return new DownloadResult(ticket.version(), bundle, manifestPath);
+        try {
+            download(checkedUrl(configuration), bundle, configuration.size());
+            verifyHash(bundle, configuration.sha256());
+            return new DownloadResult(bundle);
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            Files.deleteIfExists(bundle);
+            throw e;
+        }
     }
 
-    private void download(URI uri, Path target) throws IOException, InterruptedException {
-        if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null)
-            throw new SecretException("Download tickets require HTTPS URLs.");
+    private void download(URI uri, Path target, long expectedSize) throws IOException, InterruptedException {
         var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMinutes(15)).GET().build();
         var response = Http.CLIENT.send(request, HttpResponse.BodyHandlers.ofInputStream());
         InputStream body = response.body();
@@ -62,36 +60,74 @@ public final class ReleaseDownloader {
             body.close();
             throw new SecretException("Download failed; request details suppressed.");
         }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        if (contentLength >= 0 && contentLength != expectedSize) {
+            body.close();
+            throw new SecretException("Downloaded artifact size does not match the manifest.");
+        }
         try (body; var out = Files.newOutputStream(target)) {
             byte[] buffer = new byte[64 * 1024];
+            long total = 0;
             int count;
             while ((count = body.read(buffer)) != -1) {
+                total += count;
+                if (total > expectedSize) throw new SecretException("Downloaded artifact exceeds its manifest size.");
                 out.write(buffer, 0, count);
             }
+            if (total != expectedSize) throw new SecretException("Downloaded artifact size does not match the manifest.");
+        } catch (IOException | RuntimeException e) {
+            Files.deleteIfExists(target);
+            throw e;
         }
     }
 
-    private static void checkExpiration(DownloadTicket ticket) {
-        if (!Instant.parse(ticket.expiresAt()).isAfter(Instant.now()))
-            throw new SecretException("Download ticket is expired.");
+    private static Map<String, ReleaseArtifact> validateManifest(ReleaseManifest manifest) {
+        if (manifest == null || manifest.files() == null || manifest.files().size() != 2)
+            throw new SecretException("Invalid release manifest.");
+        var files = new HashMap<String, ReleaseArtifact>();
+        for (ReleaseArtifact artifact : manifest.files()) {
+            if (artifact == null || artifact.name() == null || artifact.size() == null || artifact.size() < 1
+                    || artifact.sha256() == null || !artifact.sha256().matches("[a-f0-9]{64}"))
+                throw new SecretException("Invalid manifest file metadata.");
+            if (ReleasePaths.SECRET_BUNDLE.equals(artifact.name()) && artifact.size() > SecretBundle.MAX_BYTES)
+                throw new SecretException("Encrypted configuration exceeds the supported size.");
+            if (!artifact.name().equals(ReleasePaths.PROGRAM_ARCHIVE)
+                    && !artifact.name().equals(ReleasePaths.SECRET_BUNDLE))
+                throw new SecretException("Unexpected manifest files.");
+            if (files.putIfAbsent(artifact.name(), artifact) != null)
+                throw new SecretException("Duplicate manifest file.");
+            checkExpiration(artifact.expiresAt());
+            checkedUrl(artifact);
+        }
+        if (!files.containsKey(ReleasePaths.PROGRAM_ARCHIVE) || !files.containsKey(ReleasePaths.SECRET_BUNDLE))
+            throw new SecretException("Unexpected manifest files.");
+        return files;
     }
 
-    private static void verifyHash(Path file, String name, ReleaseManifest manifest) throws IOException {
-        String expected = manifest.files().stream()
-                .filter(artifact -> artifact.name().equals(name))
-                .map(ReleaseArtifact::sha256)
-                .findFirst().orElse(null);
-        if (!FileHash.sha256(file).equals(expected)) throw new SecretException("Downloaded artifact failed SHA-256 verification.");
-    }
-
-    private static <T> T readJson(Path path, Class<T> type) throws IOException {
-        try (var in = Files.newInputStream(path)) {
-            try {
-                return JSON.readValue(in, type);
-            } catch (IOException e) {
-                throw new SecretException("Invalid release metadata; details suppressed.");
-            }
+    private static URI checkedUrl(ReleaseArtifact artifact) {
+        if (artifact.url() == null || artifact.url().isBlank())
+            throw new SecretException("Invalid manifest download URL.");
+        try {
+            URI uri = URI.create(artifact.url());
+            if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null)
+                throw new SecretException("Manifest download URLs require HTTPS.");
+            return uri;
+        } catch (IllegalArgumentException e) {
+            throw new SecretException("Invalid manifest download URL.");
         }
     }
 
+    private static void checkExpiration(String expiresAt) {
+        try {
+            if (expiresAt == null || !Instant.parse(expiresAt).isAfter(Instant.now()))
+                throw new SecretException("Manifest download link is expired.");
+        } catch (DateTimeParseException e) {
+            throw new SecretException("Invalid manifest expiration time.");
+        }
+    }
+
+    private static void verifyHash(Path file, String expected) throws IOException {
+        if (!FileHash.sha256(file).equals(expected))
+            throw new SecretException("Downloaded artifact failed SHA-256 verification.");
+    }
 }
